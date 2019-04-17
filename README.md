@@ -31,3 +31,6 @@ Change \<a_log> using the following key:
 0 - when using trace files and queue monitors
 1 - when using flow logs
 ```
+
+Sample scripts are provided in the scripts folder.<br />
+Disclaimer: The scripts are taken from the [PIAS project repository](https://github.com/HKUST-SING/PIAS-NS2).
