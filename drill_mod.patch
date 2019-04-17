@@ -1,0 +1,526 @@
+Only in ns-allinone-2.35/ns-2.35/: autoconf.h
+diff -aur defaultns2/ns-allinone-2.35/ns-2.35/classifier/classifier-mpath.cc ns-allinone-2.35/ns-2.35/classifier/classifier-mpath.cc
+--- defaultns2/ns-allinone-2.35/ns-2.35/classifier/classifier-mpath.cc	2005-08-25 13:58:01.000000000 -0500
++++ ns-allinone-2.35/ns-2.35/classifier/classifier-mpath.cc	2019-04-16 16:57:15.662973191 -0500
+@@ -50,26 +50,400 @@
+ #endif
+ 
+ #include "classifier.h"
++#include "ip.h"
++#include <stdlib.h>     /* srand, rand */
++#include <time.h>       /* time */
++#include <typeinfo>
++#include "connector.h"
++#include "queue.h"
++
++class MultiPathForwarder;
++
++class SamplingHandler : public Handler {
++public:
++	inline SamplingHandler(MultiPathForwarder* f, Event* ee) : clr(f), e(ee) {}
++	void handle(Event*);
++private:
++	Event* e;
++	MultiPathForwarder* clr;
++};
+ 
+ class MultiPathForwarder : public Classifier {
+ public:
+-	MultiPathForwarder() : ns_(0) {} 
+-	virtual int classify(Packet*) {
+-		int cl;
+-		int fail = ns_;
+-		do {
+-			cl = ns_++;
+-			ns_ %= (maxslot_ + 1);
+-		} while (slot_[cl] == 0 && ns_ != fail);
+-		return cl;
++	MultiPathForwarder() : ns_(0), mp_proto(0), firstTime(true), samplingDelay(10), a_log(0) {
++		bind("mp_proto", &mp_proto);
++		bind_time("samplingDelay", &samplingDelay);
++		bind("a_log", &a_log);
++	}
++	int getQueueLength(NsObject* link) {
++		if (link) {
++			Connector* p2 = dynamic_cast<Connector*>(link);
++			if (p2) {
++				NsObject* p3 = p2->target();
++				Connector* p3_ = dynamic_cast<Connector*>(p3);
++				if (p3_) {
++					Queue* p4 = dynamic_cast<Queue*>(p3_->target());
++					return p4->length();
++				}
++				Queue* p4 = dynamic_cast<Queue*>(p2->target());
++				return p4->length();
++			}
++		}
++		return -1;
+ 	}
++	int getQueueLengthGeneric(NsObject* link) {
++		if (link) {
++			Connector* p2 = dynamic_cast<Connector*>(link);
++			if (p2) {
++				Queue* p4 = dynamic_cast<Queue*>(p2->target());
++				return p4->length();
++			}
++		}
++		return -1;
++	}
++	virtual int classify(Packet* p) {
++		if (mp_proto == 1) {
++			//Round Robin
++			int cl;
++			int fail = ns_;
++			do {
++				cl = ns_++;
++				ns_ %= (maxslot_ + 1);
++			} while (slot_[cl] == 0 && ns_ != fail);
++			return cl;
++		} else if (mp_proto == 2) {
++			//ECMP
++			if (firstTime) {
++                                firstTime = false;
++
++				//collect outgoing link information
++                                numOutLinks = 0;
++                                outLinks = new NsObject*[nslot_];
++                                for (int i = 0; i < nslot_; i++) {
++                                        if (slot_[i] && (typeid(*slot_[i]) == typeid(Connector))) {
++                                                outLinks[numOutLinks] = slot_[i];
++                                                numOutLinks++;
++                                        }
++                                }
++                        }
++
++			hdr_ip* iph = hdr_ip::access(p);
++			nsaddr_t src_ip = iph->saddr();
++			nsaddr_t dst_ip = iph->daddr();
++			int32_t src_p = iph->sport();
++			int32_t dst_p = iph->dport();
++			int f_id = iph->flowid();
++
++			// calculate hash
++			int num = src_ip + dst_ip + src_p + dst_p; // + f_id;
++			int cl = num % numOutLinks;
++			for (int i = 0; i < nslot_; i++) {
++                                if (slot_[i] == outLinks[cl]) {
++                                        return i;
++                                }
++                        }
++			return 0;
++		} else if (mp_proto == 3) {
++			if (firstTime) {
++				firstTime = false;
++				srand (time(NULL));
++
++				//collect outgoing link information
++				numOutLinks = 0;
++				outLinks = new NsObject*[nslot_];
++				for (int i = 0; i < nslot_; i++) {
++					if (slot_[i] && (typeid(*slot_[i]) == typeid(Connector))) {
++						outLinks[numOutLinks] = slot_[i];
++						numOutLinks++;
++					}
++				}
++
++				//random m link for first run
++				m = rand()%numOutLinks;
++			}
++
++			//get two random numbers
++			int minQ = 0;
++			int r1;
++			int r2;
++
++			if (numOutLinks > 3) {
++				r1 = rand()%(numOutLinks - 1);
++				if (r1 >= m) {
++					r1++;
++				} else {
++					int temp = m;
++					m = r1;
++					r1 = temp;
++				}
++
++				r2 = rand()%(numOutLinks - 2);
++				if (r2 >= m) {
++					r2++;
++				}
++				if (r2 >= r1) {
++					r2++;
++				}
++			} else {
++				m = r1 = r2 = 0;
++				if (numOutLinks > 1) {
++					r1 = 1;
++				}
++				if (numOutLinks > 2) {
++					r2 = 2;
++				}
++			}
++
++			//get queue lengths for 3 links
++			int qm;
++			int q1;
++			int q2;
++			if (a_log) {
++				qm = getQueueLengthGeneric(outLinks[m]);
++				q1 = getQueueLengthGeneric(outLinks[r1]);
++				q2 = getQueueLengthGeneric(outLinks[r2]);
++			} else {
++                                qm = getQueueLength(outLinks[m]);
++                                q1 = getQueueLength(outLinks[r1]);
++                                q2 = getQueueLength(outLinks[r2]);
++			}
++
++			//choose minimum
++			if ((qm < q1) && (qm < q2)) {
++				minQ = m;
++			} else if (q1 < q2) {
++				minQ = r1;
++			} else {
++				minQ = r2;
++			}
++			m = minQ;
++			for (int i = 0; i < nslot_; i++) {
++				if (slot_[i] == outLinks[minQ]) {
++					return i;
++				}
++			}
++			return 0;
++		} else if (mp_proto == 4) {
++			//Per Interval Update
++			if (firstTime) {
++				firstTime = false;
++				srand (time(NULL));
++
++				//collect outgoing link information
++				numOutLinks = 0;
++				outLinks = new NsObject*[nslot_];
++				for (int i = 0; i < nslot_; i++) {
++					if (slot_[i] && (typeid(*slot_[i]) == typeid(Connector))) {
++						outLinks[numOutLinks] = slot_[i];
++						numOutLinks++;
++					}
++				}
++
++				//random m link for first run
++				m = rand()%numOutLinks;
++
++				//create local state
++				qLengths = new int[numOutLinks];
++				for (int i = 0; i < numOutLinks; i++) {
++					if (a_log) {
++						qLengths[i] = getQueueLengthGeneric(outLinks[i]);
++					} else {
++						qLengths[i] = getQueueLength(outLinks[i]);
++					}
++				}
++
++				//schedule periodic updates
++                                Event* e = new Event();
++                                Scheduler::instance().schedule(new SamplingHandler(this, e), e, samplingDelay);
++			}
++
++			//get two random numbers
++			int minQ = 0;
++			int r1;
++			int r2;
++
++			if (numOutLinks > 3) {
++				r1 = rand()%(numOutLinks - 1);
++				if (r1 >= m) {
++					r1++;
++				} else {
++					int temp = m;
++					m = r1;
++					r1 = temp;
++				}
++
++				r2 = rand()%(numOutLinks - 2);
++				if (r2 >= m) {
++					r2++;
++				}
++				if (r2 >= r1) {
++					r2++;
++				}
++			} else {
++				m = r1 = r2 = 0;
++				if (numOutLinks > 1) {
++					r1 = 1;
++				}
++				if (numOutLinks > 2) {
++					r2 = 2;
++				}
++			}
++
++			//get queue lengths for 3 links
++			int qm = qLengths[m];
++			int q1 = qLengths[r1];
++			int q2 = qLengths[r2];
++
++			//choose minimum
++			if ((qm < q1) && (qm < q2)) {
++				minQ = m;
++			} else if (q1 < q2) {
++				minQ = r1;
++			} else {
++				minQ = r2;
++			}
++			m = minQ;
++
++			for (int i = 0; i < nslot_; i++) {
++				if (slot_[i] == outLinks[minQ]) {
++					return i;
++				}
++			}
++			return 0;
++		} else if ((mp_proto == 5) || (mp_proto == 6)) {
++			//Per Packet Update || Combined Update
++                        if (firstTime) {
++                                firstTime = false;
++                                srand (time(NULL));
++
++				//collect outgoing link information
++                                numOutLinks = 0;
++                                outLinks = new NsObject*[nslot_];
++                                for (int i = 0; i < nslot_; i++) {
++                                        if (slot_[i] && (typeid(*slot_[i]) == typeid(Connector))) {
++                                                outLinks[numOutLinks] = slot_[i];
++                                                numOutLinks++;
++                                        }
++                                }
++
++				//random m link for first run
++                                m = rand()%numOutLinks;
++
++				//create local state
++                                qLengths = new int[numOutLinks];
++                                for (int i = 0; i < numOutLinks; i++) {
++                                        if (a_log) {
++                                                qLengths[i] = getQueueLengthGeneric(outLinks[i]);
++                                        } else {
++                                                qLengths[i] = getQueueLength(outLinks[i]);
++                                        }
++                                }
++
++				if (mp_proto == 6) {
++					//schedule periodic updates (if combined updates)
++                                	Event* e = new Event();
++                                	Scheduler::instance().schedule(new SamplingHandler(this, e), e, samplingDelay);
++				}
++                        }
++
++			//update queue of link with the same dst as p->lasthop //
++                        for (int i = 0; i < numOutLinks; i++) {
++				if ((dynamic_cast<Connector*> (outLinks[i]))->dst() == p->lasthop) {
++                                        if (a_log) {
++                                                qLengths[i] = getQueueLengthGeneric(outLinks[i]);
++                                        } else {
++                                                qLengths[i] = getQueueLength(outLinks[i]);
++                                        }
++				}
++                        }
++
++			//get two random numbers
++                        int minQ = 0;
++                        int r1;
++                        int r2;
++
++                        if (numOutLinks > 3) {
++                                r1 = rand()%(numOutLinks - 1);
++                                if (r1 >= m) {
++                                        r1++;
++                                } else {
++                                        int temp = m;
++                                        m = r1;
++                                        r1 = temp;
++                                }
++
++                                r2 = rand()%(numOutLinks - 2);
++                                if (r2 >= m) {
++                                        r2++;
++                                }
++                                if (r2 >= r1) {
++                                        r2++;
++                                }
++                        } else {
++                                m = r1 = r2 = 0;
++                                if (numOutLinks > 1) {
++                                        r1 = 1;
++                                }
++                                if (numOutLinks > 2) {
++                                        r2 = 2;
++                                }
++                        }
++
++			//get queue lengths for 3 links
++                        int qm = qLengths[m];
++                        int q1 = qLengths[r1];
++                        int q2 = qLengths[r2];
++
++			//choose minimum
++                        if ((qm < q1) && (qm < q2)) {
++                                minQ = m;
++                        } else if (q1 < q2) {
++                                minQ = r1;
++                        } else {
++                                minQ = r2;
++                        }
++                        m = minQ;
++
++                        for (int i = 0; i < nslot_; i++) {
++                                if (slot_[i] == outLinks[minQ]) {
++                                        return i;
++                                }
++                        }
++                        return 0;
++                }
++		return 0;
++
++	}
++
++
++	NsObject** outLinks;
++	int numOutLinks;
++	double samplingDelay;
++	int* qLengths;
++	int a_log;
++
+ private:
+ 	int ns_;
++	int mp_proto;
++	int m;
++	bool firstTime;
+ };
+ 
++void SamplingHandler::handle(Event*) {
++	for (int i = 0; i < clr->numOutLinks; i++) {
++		if (clr->a_log) {
++			clr->qLengths[i] = clr->getQueueLengthGeneric(clr->outLinks[i]);
++		} else {
++			clr->qLengths[i] = clr->getQueueLength(clr->outLinks[i]);
++		}
++	}
++	Scheduler::instance().schedule(this, e, clr->samplingDelay);
++//	Scheduler::instance().schedule(new SamplingHandler(clr), new Event(), clr->samplingDelay);
++}
++
+ static class MultiPathClass : public TclClass {
+ public:
+-	MultiPathClass() : TclClass("Classifier/MultiPath") {} 
++	MultiPathClass() : TclClass("Classifier/MultiPath") {}
+ 	TclObject* create(int, const char*const*) {
+ 		return (new MultiPathForwarder());
+ 	}
+Only in ns-allinone-2.35/ns-2.35/classifier: classifier-mpath.cc.save
+Only in ns-allinone-2.35/ns-2.35/classifier: classifier-mpath.cc.save.1
+diff -aur defaultns2/ns-allinone-2.35/ns-2.35/common/connector.cc ns-allinone-2.35/ns-2.35/common/connector.cc
+--- defaultns2/ns-allinone-2.35/ns-2.35/common/connector.cc	1998-12-08 17:43:05.000000000 -0600
++++ ns-allinone-2.35/ns-2.35/common/connector.cc	2019-04-16 16:44:58.919270441 -0500
+@@ -48,8 +48,10 @@
+ 	}
+ } class_connector;
+ 
+-Connector::Connector() : target_(0), drop_(0)
++Connector::Connector() : target_(0), drop_(0), src_(0), dst_(0)
+ {
++	bind("src_", &src_);
++	bind("dst_", &dst_);
+ }
+ 
+ 
+@@ -100,6 +102,7 @@
+ 
+ void Connector::recv(Packet* p, Handler* h)
+ {
++	p->lasthop = src_;
+ 	send(p, h);
+ }
+ 
+diff -aur defaultns2/ns-allinone-2.35/ns-2.35/common/connector.h ns-allinone-2.35/ns-2.35/common/connector.h
+--- defaultns2/ns-allinone-2.35/ns-2.35/common/connector.h	2005-09-26 03:41:55.000000000 -0500
++++ ns-allinone-2.35/ns-2.35/common/connector.h	2019-04-16 16:44:25.047915900 -0500
+@@ -48,7 +48,8 @@
+ 	inline NsObject* target() { return target_; }
+ 	void target (NsObject *target) { target_ = target; }
+ 	virtual void drop(Packet* p);
+-	void setDropTarget(NsObject *dt) {drop_ = dt; } 
++	void setDropTarget(NsObject *dt) {drop_ = dt; }
++	int dst() { return dst_; }
+ protected:
+ 	virtual void drop(Packet* p, const char *s);
+ 	int command(int argc, const char*const* argv);
+@@ -57,6 +58,8 @@
+ 
+ 	NsObject* target_;
+ 	NsObject* drop_;	// drop target for this connector
++	int src_;
++	int dst_;
+ };
+ 
+ #endif
+diff -aur defaultns2/ns-allinone-2.35/ns-2.35/common/packet.h ns-allinone-2.35/ns-2.35/common/packet.h
+--- defaultns2/ns-allinone-2.35/ns-2.35/common/packet.h	2010-05-09 17:28:41.000000000 -0500
++++ ns-allinone-2.35/ns-2.35/common/packet.h	2019-04-03 02:55:26.072616552 -0500
+@@ -555,6 +555,8 @@
+         u_int8_t        incoming;
+ 
+ 	//monarch extns end;
++
++	int lasthop;
+ };
+ 
+ /* 
+Only in ns-allinone-2.35/ns-2.35/: config.log
+Only in ns-allinone-2.35/ns-2.35/: config.status
+Only in ns-allinone-2.35/ns-2.35/: gen
+Only in ns-allinone-2.35/ns-2.35/indep-utils/cmu-scen-gen/setdest: calcdest
+Only in ns-allinone-2.35/ns-2.35/indep-utils/cmu-scen-gen/setdest: Makefile
+Only in ns-allinone-2.35/ns-2.35/indep-utils/webtrace-conv/dec: Makefile
+Only in ns-allinone-2.35/ns-2.35/indep-utils/webtrace-conv/epa: Makefile
+Only in ns-allinone-2.35/ns-2.35/indep-utils/webtrace-conv/nlanr: Makefile
+Only in ns-allinone-2.35/ns-2.35/indep-utils/webtrace-conv/ucb: Makefile
+diff -aur defaultns2/ns-allinone-2.35/ns-2.35/linkstate/ls.h ns-allinone-2.35/ns-2.35/linkstate/ls.h
+--- defaultns2/ns-allinone-2.35/ns-2.35/linkstate/ls.h	2010-03-07 23:54:51.000000000 -0600
++++ ns-allinone-2.35/ns-2.35/linkstate/ls.h	2018-11-26 13:35:21.705381731 -0600
+@@ -134,7 +134,7 @@
+ 		return ib.second ? ib.first : baseMap::end();
+ 	}
+ 
+-	void eraseAll() { erase(baseMap::begin(), baseMap::end()); }
++	void eraseAll() { this->erase(baseMap::begin(), baseMap::end()); }
+ 	T* findPtr(Key key) {
+ 		iterator it = baseMap::find(key);
+ 		return (it == baseMap::end()) ? (T *)NULL : &((*it).second);
+Only in ns-allinone-2.35/ns-2.35/: Makefile
+Only in ns-allinone-2.35/ns-2.35/tcl/lib: ns-autoconf.tcl
+diff -aur defaultns2/ns-allinone-2.35/ns-2.35/tcl/lib/ns-default.tcl ns-allinone-2.35/ns-2.35/tcl/lib/ns-default.tcl
+--- defaultns2/ns-allinone-2.35/ns-2.35/tcl/lib/ns-default.tcl	2010-07-03 17:45:45.000000000 -0500
++++ ns-allinone-2.35/ns-2.35/tcl/lib/ns-default.tcl	2019-04-04 02:04:40.546593159 -0500
+@@ -54,6 +54,9 @@
+ # Increased Floating Point Precision
+ set tcl_precision 17
+ 
++Connector set src_ 0
++Connector set dst_ 0
++
+ Connector set debug_ false
+ TTLChecker set debug_ false
+ 
+diff -aur defaultns2/ns-allinone-2.35/ns-2.35/tcl/lib/ns-link.tcl ns-allinone-2.35/ns-2.35/tcl/lib/ns-link.tcl
+--- defaultns2/ns-allinone-2.35/ns-2.35/tcl/lib/ns-link.tcl	2009-01-15 00:14:27.000000000 -0600
++++ ns-allinone-2.35/ns-2.35/tcl/lib/ns-link.tcl	2019-04-16 16:48:52.922718792 -0500
+@@ -180,6 +180,9 @@
+ 	set head_ [new Connector]
+ 	$head_ set link_ $self
+ 
++	$head_ set src_ [$src id]
++	$head_ set dst_ [$dst id]
++
+ 	#set head_ $queue_ -> replace by the following
+ 	# xxx this is hacky
+ 	if { [[$q info class] info heritage ErrModule] == "ErrorModule" } {
+Only in ns-allinone-2.35/ns-2.35/tcl/test: out.tr
+Only in ns-allinone-2.35/ns-2.35/tcl/test: temp.rands
+Only in ns-allinone-2.35/ns-2.35/tcl/test: temp.randsgz
