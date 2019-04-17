@@ -100,7 +100,7 @@ diff -aur defaultns2/ns-allinone-2.35/ns-2.35/classifier/classifier-mpath.cc ns-
 +			int f_id = iph->flowid();
 +
 +			// calculate hash
-+			int num = src_ip + dst_ip + src_p + dst_p; // + f_id;
++			int num = src_ip + dst_ip + src_p + dst_p + f_id;
 +			int cl = num % numOutLinks;
 +			for (int i = 0; i < nslot_; i++) {
 +                                if (slot_[i] == outLinks[cl]) {
