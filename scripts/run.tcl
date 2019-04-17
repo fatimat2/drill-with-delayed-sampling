@@ -189,5 +189,5 @@ for {set j 0} {$j < $S } {incr j} {
 
 puts "Simulation started!"
 
-$ns at 5 "finish"
+$ns at 30 "finish"
 $ns run

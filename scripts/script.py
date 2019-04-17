@@ -34,8 +34,8 @@ min_rto=0.0002
 prob_cap_=5
 
 topology_spt=4
-topology_tors=4
-topology_spines=4
+topology_tors=8
+topology_spines=10
 topology_x=1.25
 
 enable_tr = 0
